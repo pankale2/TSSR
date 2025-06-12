@@ -80,6 +80,9 @@ def index():
                         emails = chunk['Email address'].astype(str).fillna('')
                         chunk['Em'] = emails.str.split('@').str[0]
                         chunk['Dom'] = emails.str.split('@').str[1].fillna('')
+                        # Add placeholder columns for EmCap# and EmNum#
+                        chunk['EmCap#'] = ''
+                        chunk['EmNum#'] = ''
                     else:
                         flash('No "Email address" column found in CSV.')
                         return redirect(request.url)
@@ -88,19 +91,18 @@ def index():
                 
                 df = pd.concat(df_chunks, ignore_index=True)
 
-                # Remove empty columns
-                df = df.dropna(axis=1, how='all')
-
                 desired_order = [
                     'Panelist id', 'Created', 'Date last answer', 'Date last sent', 'Last login', 'Last updated',
-                    'Date of birth', 'Em', 'Dom', 'Email address', 'First name', 'Gender', 'Last name',
-                    'Phone number', 'Postal code', 'Postal name', 'Address', 'Cell phone number', 'Member id',
-                    'Panel id', 'Panelist status', 'Invitations', 'Ranking', 'Recruitment source', 'Year of birth',
-                    'Current points balance', 'Days between mail outs'
+                    'Date of birth', 'Postal code', 'Em', 'Dom', 'Email address', 'EmCap#', 'EmNum#',
+                    'Gender', 'Postal name', 'First name', 'Last name', 'Phone number', 'Address',
+                    'Cell phone number', 'Member id', 'Panel id', 'Panelist status', 'Invitations',
+                    'Ranking', 'Recruitment source', 'Year of birth', 'Current points balance', 'Days between mail outs'
                 ]
                 columns_to_use = [col for col in desired_order if col in df.columns]
                 columns_to_use += [col for col in df.columns if col not in columns_to_use]
                 df = df.reindex(columns=columns_to_use)
+
+                # No need to move EmCap# and EmNum# after Em, as they are now after Email address in desired_order
 
                 # Create Excel file in memory
                 excel_buffer = BytesIO()
@@ -174,7 +176,7 @@ def index():
                         )
 
                         # Apply individual formatting
-                        individual_columns = ['Panelist id', 'Created', 'Date of birth']
+                        individual_columns = ['Panelist id', 'Date of birth', 'Postal code']
                         for col in individual_columns:
                             if col in df.columns:
                                 col_idx = df.columns.get_loc(col) + 1
@@ -183,7 +185,7 @@ def index():
                                 worksheet.conditional_formatting.add(col_range, individual_color_rule)
 
                         # Apply collective formatting
-                        collective_columns = ['Last login', 'Last updated', 'Date last answer', 'Date last sent']
+                        collective_columns = ['Created', 'Last login', 'Last updated', 'Date last answer', 'Date last sent']
                         ranges = []
                         for col in collective_columns:
                             if col in df.columns:
@@ -193,11 +195,61 @@ def index():
                         if ranges:
                             worksheet.conditional_formatting.add(' '.join(ranges), collective_color_rule)
 
+                        # Insert Excel formulas for EmCap# and EmNum#
+                        header = [cell.value for cell in worksheet[1]]
+                        if 'Em' in header and 'EmCap#' in header and 'EmNum#' in header:
+                            em_col = header.index('Em') + 1
+                            emcap_col = header.index('EmCap#') + 1
+                            emnum_col = header.index('EmNum#') + 1
+                            for row in range(2, worksheet.max_row + 1):
+                                # Formula for counting capital letters in Em
+                                worksheet.cell(row=row, column=emcap_col).value = f'=SUMPRODUCT(--(CODE(MID({get_column_letter(em_col)}{row},ROW(INDIRECT("1:"&LEN({get_column_letter(em_col)}{row}))),1))>=65),--(CODE(MID({get_column_letter(em_col)}{row},ROW(INDIRECT("1:"&LEN({get_column_letter(em_col)}{row}))),1))<=90))'
+                                # Formula for counting numeric digits in Em
+                                worksheet.cell(row=row, column=emnum_col).value = f'=SUMPRODUCT(--ISNUMBER(MATCH(MID({get_column_letter(em_col)}{row},ROW(INDIRECT("1:"&LEN({get_column_letter(em_col)}{row}))),1),{{"0","1","2","3","4","5","6","7","8","9"}},0)))'
+
+                        # Remove the word "Date " from any column headers if present
+                        for cell in worksheet[1]:
+                            if cell.value and isinstance(cell.value, str) and cell.value.startswith("Date "):
+                                cell.value = cell.value.replace("Date ", "", 1)
+
+                        # Remove empty columns from the Excel sheet before finalizing
+                        for col in reversed(range(1, worksheet.max_column + 1)):
+                            col_letter = get_column_letter(col)
+                            # Check if all cells (except header) in this column are empty
+                            if all(worksheet.cell(row=row, column=col).value in (None, '', float('nan')) for row in range(2, worksheet.max_row + 1)):
+                                worksheet.delete_cols(col)
+
+                        # Sort the entire sheet 3 times: Em, then Panelist id, then Dom
+                        from openpyxl.worksheet.table import Table, TableStyleInfo
+                        from openpyxl.utils import column_index_from_string
+
+                        def sort_worksheet(ws, sort_col_name):
+                            # Find the column index for the sort column
+                            header = [cell.value for cell in ws[1]]
+                            if sort_col_name not in header:
+                                return
+                            sort_col_idx = header.index(sort_col_name) + 1
+                            data = []
+                            for row in ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True):
+                                data.append(row)
+                            # Sort data by the specified column (None values last)
+                            data.sort(key=lambda x: (x[sort_col_idx-1] is None, x[sort_col_idx-1]))
+                            # Write sorted data back
+                            for i, row in enumerate(data, start=2):
+                                for j, value in enumerate(row, start=1):
+                                    ws.cell(row=i, column=j, value=value)
+
+                        # Sort by Em, then Panelist id, then Dom (in this order)
+                        sort_worksheet(worksheet, "Em")
+                        sort_worksheet(worksheet, "Panelist id")
+                        sort_worksheet(worksheet, "Dom")
+
                         # Freeze the first row (must be last)
                         worksheet.freeze_panes = 'A2'
 
                         # Apply autofilter to all columns (must be last)
                         worksheet.auto_filter.ref = worksheet.dimensions
+
                 except Exception as excel_err:
                     flash(f'Error writing to Excel: {str(excel_err)}')
                     return redirect(request.url)
