@@ -2,3 +2,9 @@ Flask
 pandas
 openpyxl
 gunicorn
+pyinstaller
+
+# If you see "Defaulting to user installation because normal site-packages is not writeable"
+# You can safely ignore this message, or run pip with --user:
+#   pip install --user -r requirements.txt
+# Or run your terminal as administrator for global install.
